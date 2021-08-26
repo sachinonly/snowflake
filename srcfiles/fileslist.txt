@@ -1,0 +1,4 @@
+TableName;Column1;Column2;Column3;Column4
+Table1;TCOL1 integer, TCOL2 varchar2(30) , TCOL3 integer , TCOL4 varchar2(10) 
+Table2;TCOL1 integer, TCOL2 varchar2(30) , TCOL3 integer , TCOL4 varchar2(10)
+Table3;TCOL1 integer, TCOL2 varchar2(30) , TCOL3 integer , TCOL4 varchar2(10)
