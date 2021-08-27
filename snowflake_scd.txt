@@ -1,0 +1,71 @@
+--Slowly Changing Dimension:
+-------------------------------------------
+
+create or replace table employee (empid number,empname varchar(30),city varchar(30), update_timestamp timestamp_ntz);
+create or replace table employee_history (empid number,empname varchar(30),city varchar(30),start_time timestamp_ntz,end_time timestamp_ntz, current_flag int);
+create or replace stream employee_stream on table employee;
+
+create or replace view employee_view as
+-- This subquery figures out what to do when data is inserted into the EMPLOYEE table
+-- An insert to the EMPLOYEE table results in an INSERT to the EMPLOYEE_HISTORY table
+select empid, empname, city, start_time, end_time, current_flag, 'I' as dml_type
+from (select empid,empname,city,
+             update_timestamp as start_time,
+             lag(update_timestamp) over (partition by empid order by update_timestamp desc) as end_time_raw,
+             case when end_time_raw is null then '9999-12-31'::timestamp_ntz else end_time_raw end as end_time,
+             case when end_time_raw is null then 1 else 0 end as current_flag
+      from (select empid,empname,city, update_timestamp
+            from employee_stream
+            where metadata$action = 'INSERT'
+            and metadata$isupdate = 'FALSE'))
+union
+-- This subquery figures out what to do when data is updated in the EMPLOYEE table
+-- An update to the EMPLOYEE table results in an update AND an insert to the EMPLOYEE_HISTORY table
+-- The subquery below generates two records, each with a different dml_type
+select empid,empname,city, start_time, end_time, current_flag, dml_type
+from (select empid,empname,city,
+             update_timestamp as start_time,
+             lag(update_timestamp) over (partition by empid order by update_timestamp desc) as end_time_raw,
+             case when end_time_raw is null then '9999-12-31'::timestamp_ntz else end_time_raw end as end_time,
+             case when end_time_raw is null then 1 else 0 end as current_flag, 
+             dml_type
+      from (-- Identify data to insert into employee_history table
+            select empid,empname,city, update_timestamp, 'I' as dml_type
+            from employee_stream
+            where metadata$action = 'INSERT'
+            and metadata$isupdate = 'TRUE'
+            union
+            -- Identify data in EMPLOYEE_HISTORY table that needs to be updated
+            select empid, null, null, start_time, 'U' as dml_type
+            from employee_history
+            where empid in (select distinct empid
+                                  from employee_stream
+                                  where metadata$action = 'INSERT'
+                                  and metadata$isupdate = 'TRUE')
+     and current_flag = 1))
+union
+-- This subquery figures out what to do when data is deleted from the EMPLOYEE table
+-- A deletion from the EMPLOYEE table results in an update to the EMPLOYEE_HISTORY table
+select es.empid, null, null, eh.start_time, current_timestamp()::timestamp_ntz, null, 'D'
+from employee_history eh
+inner join employee_stream es
+   on eh.empid = es.empid
+where es.metadata$action = 'DELETE'
+and   es.metadata$isupdate = 'FALSE'
+and   eh.current_flag = 1;
+
+
+
+merge into employee_history eh
+using employee_view ev
+  on eh.empid = ev.empid
+  and eh.start_time = ev.start_time
+when matched and ev.dml_type ='U' then update
+  set eh.end_time = ev.end_time,
+      ev.current_flag = 0
+when matched and ev.dml_type ='D' then update
+  set eh.end_time = ev.end_time,
+      ev.current_flag = 0
+when not matched and ev.dml_type = 'I' then insert
+       (empid,empname,location,start_time, end_time, current_flag)
+values (ev.empid, ev.empname, ev.location, ev.start_time, ev.end_time, ev.current_flag);
